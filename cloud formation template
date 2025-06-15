@@ -11,7 +11,7 @@ Resources:
   VPC:
     Type: AWS::EC2::VPC
     Properties:
-      CidrBlock: 12.0.0.0/24
+      CidrBlock: 10.0.0.0/16
       EnableDnsSupport: true
       EnableDnsHostnames: true
       Tags:
@@ -32,7 +32,7 @@ Resources:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: 12.0.1.0/24
+      CidrBlock: 10.0.1.0/24
       MapPublicIpOnLaunch: true
       AvailabilityZone: !Select [0, !GetAZs ""]
 
@@ -41,7 +41,7 @@ Resources:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: 12.0.2.0/24
+      CidrBlock: 10.0.2.0/24
       MapPublicIpOnLaunch: false
       AvailabilityZone: !Select [0, !GetAZs ""]
 
@@ -122,7 +122,7 @@ Resources:
     Properties:
       InstanceType: t2.micro
       KeyName: !Ref KeyName
-      ImageId: ami-0e731c8a588258d0d # Updated Ubuntu 24.04 LTS AMI
+      ImageId: ami-0f918f7e67a3323f0
       SubnetId: !Ref PublicSubnet
       SecurityGroupIds:
         - !Ref PublicSG
@@ -169,7 +169,7 @@ Resources:
     Properties:
       InstanceType: t2.medium
       KeyName: !Ref KeyName
-      ImageId: ami-0e731c8a588258d0d # Updated Ubuntu 24.04 LTS AMI
+      ImageId: ami-0f918f7e67a3323f0
       SubnetId: !Ref PrivateSubnet
       SecurityGroupIds:
         - !Ref PrivateSG
@@ -179,10 +179,10 @@ Resources:
           export DEBIAN_FRONTEND=noninteractive
           exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
           set -e
-          REPO_URL="<REPO_URL_PLACEHOLDER>"
+          REPO_URL="https://github.com/JohnKumarK/fullstack-crud-react-node-postgresql.git"
           APP_DIR="/opt/fullstack"
-          BACKEND_DIR="$APP_DIR/server"
-          FRONTEND_DIR="$APP_DIR/client"
+          BACKEND_DIR="$$APP_DIR/server"
+          FRONTEND_DIR="$$APP_DIR/webclient"
           USER_NAME="ubuntu"
           API_PORT=5000
           UI_PORT=3000
@@ -190,35 +190,30 @@ Resources:
           DB_USER="postgres"
           DB_PASS=""
 
-          if [[ -z "$REPO_URL" ]]; then
-            echo "❌ Usage: <script> <GitHub Repo URL>"
-            exit 1
-          fi
-
           apt update
           apt install -y git nodejs npm postgresql postgresql-client curl build-essential
 
-          rm -rf $APP_DIR
-          mkdir -p $APP_DIR
+          rm -rf $$APP_DIR
+          mkdir -p $$APP_DIR
 
-          git clone "$REPO_URL" $APP_DIR
+          git clone "$$REPO_URL" $$APP_DIR
 
           npm config set registry https://registry.npmmirror.com
 
           sudo -u postgres psql <<EOF
           DO \$\$
           BEGIN
-            IF NOT EXISTS (SELECT FROM pg_user WHERE usename = '${DB_USER}') THEN
-              CREATE USER ${DB_USER};
+            IF NOT EXISTS (SELECT FROM pg_user WHERE usename = '$$DB_USER') THEN
+              CREATE USER $$DB_USER;
             END IF;
           END
           \$\$;
           EOF
 
-          sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname = '${DB_NAME}'" | grep -q 1 || \
-            sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
+          sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname = '$$DB_NAME'" | grep -q 1 || \
+            sudo -u postgres psql -c "CREATE DATABASE $$DB_NAME OWNER $$DB_USER;"
 
-          sudo -u postgres psql -d ${DB_NAME} <<EOF
+          sudo -u postgres psql -d $$DB_NAME <<EOF
           CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
             name VARCHAR(100),
@@ -226,7 +221,7 @@ Resources:
           );
           EOF
 
-          cd $BACKEND_DIR
+          cd $$BACKEND_DIR
           npm install --legacy-peer-deps --no-audit
 
           cat >/etc/systemd/system/backend.service <<EOF
@@ -235,23 +230,23 @@ Resources:
           After=network.target
 
           [Service]
-          ExecStart=$(which node) $BACKEND_DIR/index.js
-          WorkingDirectory=$BACKEND_DIR
+          ExecStart=$(which node) $$BACKEND_DIR/index.js
+          WorkingDirectory=$$BACKEND_DIR
           Restart=always
-          User=$USER_NAME
-          Environment=PORT=$API_PORT
+          User=$$USER_NAME
+          Environment=PORT=$$API_PORT
 
           [Install]
           WantedBy=multi-user.target
           EOF
 
-          cd $FRONTEND_DIR
+          cd $$FRONTEND_DIR
           rm -rf node_modules package-lock.json
           npm install --legacy-peer-deps --no-audit
 
-          API_JS="$FRONTEND_DIR/src/Api.js"
-          if [ -f "$API_JS" ]; then
-            sed -i 's|const API_URL = .*|const API_URL = "/api";|' "$API_JS"
+          API_JS="$$FRONTEND_DIR/src/Api.js"
+          if [ -f "$$API_JS" ]; then
+            sed -i 's|const API_URL = .*|const API_URL = "/api";|' "$$API_JS"
           fi
 
           npm run build
@@ -264,10 +259,10 @@ Resources:
           After=network.target
 
           [Service]
-          ExecStart=$(which serve) -s build -l $UI_PORT
-          WorkingDirectory=$FRONTEND_DIR
+          ExecStart=$(which serve) -s build -l $$UI_PORT
+          WorkingDirectory=$$FRONTEND_DIR
           Restart=always
-          User=$USER_NAME
+          User=$$USER_NAME
 
           [Install]
           WantedBy=multi-user.target
