@@ -122,16 +122,46 @@ Resources:
     Properties:
       InstanceType: t2.micro
       KeyName: !Ref KeyName
-      ImageId: ami-0fc5d935ebf8bc3bc # Ubuntu 24.04 (example)
+      ImageId: ami-0e731c8a588258d0d # Updated Ubuntu 24.04 LTS AMI
       SubnetId: !Ref PublicSubnet
       SecurityGroupIds:
         - !Ref PublicSG
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
+          export DEBIAN_FRONTEND=noninteractive
+          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
           apt update && apt install -y nginx
           systemctl start nginx
           systemctl enable nginx
+
+          PRIVATE_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4 | sed 's/\.[0-9]*$/\.10/')
+          cat >/etc/nginx/sites-available/default <<EOF
+          server {
+              listen 80;
+              server_name _;
+
+              location /api/ {
+                  proxy_pass http://$PRIVATE_IP:5000/;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade \$http_upgrade;
+                  proxy_set_header Connection 'upgrade';
+                  proxy_set_header Host \$host;
+                  proxy_cache_bypass \$http_upgrade;
+              }
+
+              location / {
+                  proxy_pass http://$PRIVATE_IP:3000/;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade \$http_upgrade;
+                  proxy_set_header Connection 'upgrade';
+                  proxy_set_header Host \$host;
+                  proxy_cache_bypass \$http_upgrade;
+              }
+          }
+          EOF
+
+          systemctl restart nginx
 
   # EC2 - Private (React + Node.js + PostgreSQL)
   AppInstance:
@@ -139,13 +169,15 @@ Resources:
     Properties:
       InstanceType: t2.medium
       KeyName: !Ref KeyName
-      ImageId: ami-0fc5d935ebf8bc3bc
+      ImageId: ami-0e731c8a588258d0d # Updated Ubuntu 24.04 LTS AMI
       SubnetId: !Ref PrivateSubnet
       SecurityGroupIds:
         - !Ref PrivateSG
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
+          export DEBIAN_FRONTEND=noninteractive
+          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
           set -e
           REPO_URL="<REPO_URL_PLACEHOLDER>"
           APP_DIR="/opt/fullstack"
@@ -219,7 +251,7 @@ Resources:
 
           API_JS="$FRONTEND_DIR/src/Api.js"
           if [ -f "$API_JS" ]; then
-            sed -i 's|const API_URL = .*|const API_URL = "http://localhost:5000";|' "$API_JS"
+            sed -i 's|const API_URL = .*|const API_URL = "/api";|' "$API_JS"
           fi
 
           npm run build
