@@ -1,0 +1,254 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: VPC with Public (Nginx) and Private (React/Node/PostgreSQL) EC2 Setup
+
+Parameters:
+  KeyName:
+    Description: Name of an existing EC2 KeyPair
+    Type: AWS::EC2::KeyPair::KeyName
+
+Resources:
+  # VPC
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 12.0.0.0/24
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: Fullstack-VPC
+
+  # Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public Subnet (Nginx)
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 12.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs ""]
+
+  # Private Subnet (Node/React/PostgreSQL)
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 12.0.2.0/24
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !Select [0, !GetAZs ""]
+
+  # Route Table (Public)
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # Route Table (Private)
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
+
+  # Security Group for Public Instance (Nginx)
+  PublicSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP (80), HTTPS (443)
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: PublicSG
+
+  # Security Group for Private Instance (App & DB)
+  PrivateSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow access from Nginx and internal
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          SourceSecurityGroupId: !Ref PublicSG
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          SourceSecurityGroupId: !Ref PublicSG
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref PublicSG
+      Tags:
+        - Key: Name
+          Value: PrivateSG
+
+  # EC2 - Public (Nginx)
+  NginxInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      ImageId: ami-0fc5d935ebf8bc3bc # Ubuntu 24.04 (example)
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref PublicSG
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          apt update && apt install -y nginx
+          systemctl start nginx
+          systemctl enable nginx
+
+  # EC2 - Private (React + Node.js + PostgreSQL)
+  AppInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.medium
+      KeyName: !Ref KeyName
+      ImageId: ami-0fc5d935ebf8bc3bc
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref PrivateSG
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          REPO_URL="<REPO_URL_PLACEHOLDER>"
+          APP_DIR="/opt/fullstack"
+          BACKEND_DIR="$APP_DIR/server"
+          FRONTEND_DIR="$APP_DIR/client"
+          USER_NAME="ubuntu"
+          API_PORT=5000
+          UI_PORT=3000
+          DB_NAME="reactdb"
+          DB_USER="postgres"
+          DB_PASS=""
+
+          if [[ -z "$REPO_URL" ]]; then
+            echo "❌ Usage: <script> <GitHub Repo URL>"
+            exit 1
+          fi
+
+          apt update
+          apt install -y git nodejs npm postgresql postgresql-client curl build-essential
+
+          rm -rf $APP_DIR
+          mkdir -p $APP_DIR
+
+          git clone "$REPO_URL" $APP_DIR
+
+          npm config set registry https://registry.npmmirror.com
+
+          sudo -u postgres psql <<EOF
+          DO \$\$
+          BEGIN
+            IF NOT EXISTS (SELECT FROM pg_user WHERE usename = '${DB_USER}') THEN
+              CREATE USER ${DB_USER};
+            END IF;
+          END
+          \$\$;
+          EOF
+
+          sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname = '${DB_NAME}'" | grep -q 1 || \
+            sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
+
+          sudo -u postgres psql -d ${DB_NAME} <<EOF
+          CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(100),
+            email VARCHAR(100)
+          );
+          EOF
+
+          cd $BACKEND_DIR
+          npm install --legacy-peer-deps --no-audit
+
+          cat >/etc/systemd/system/backend.service <<EOF
+          [Unit]
+          Description=Node.js Backend Service
+          After=network.target
+
+          [Service]
+          ExecStart=$(which node) $BACKEND_DIR/index.js
+          WorkingDirectory=$BACKEND_DIR
+          Restart=always
+          User=$USER_NAME
+          Environment=PORT=$API_PORT
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          cd $FRONTEND_DIR
+          rm -rf node_modules package-lock.json
+          npm install --legacy-peer-deps --no-audit
+
+          API_JS="$FRONTEND_DIR/src/Api.js"
+          if [ -f "$API_JS" ]; then
+            sed -i 's|const API_URL = .*|const API_URL = "http://localhost:5000";|' "$API_JS"
+          fi
+
+          npm run build
+
+          npm install -g serve --no-audit
+
+          cat >/etc/systemd/system/frontend.service <<EOF
+          [Unit]
+          Description=React Frontend Service
+          After=network.target
+
+          [Service]
+          ExecStart=$(which serve) -s build -l $UI_PORT
+          WorkingDirectory=$FRONTEND_DIR
+          Restart=always
+          User=$USER_NAME
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          systemctl daemon-reexec
+          systemctl daemon-reload
+          systemctl enable --now backend.service frontend.service
+
+Outputs:
+  NginxPublicIP:
+    Description: Public IP of Nginx Instance
+    Value: !GetAtt NginxInstance.PublicIp
+  PrivateAppInstance:
+    Description: Private IP of Fullstack App Instance
+    Value: !GetAtt AppInstance.PrivateIp
