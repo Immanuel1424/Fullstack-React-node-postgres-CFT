@@ -1,55 +1,60 @@
-AWSTemplateFormatVersion: "2010-09-09"
-Description: VPC with Public (Nginx) and Private (React/Node/PostgreSQL) EC2 Setup
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deploy a fullstack React + Node.js + PostgreSQL app with NAT Gateway and Nginx proxy
 
 Parameters:
   KeyName:
-    Description: Name of an existing EC2 KeyPair
     Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 KeyPair
+  InstanceType:
+    Type: String
+    Default: t3.micro
 
 Resources:
-  # VPC
+
   VPC:
     Type: AWS::EC2::VPC
     Properties:
-      CidrBlock: 10.0.0.0/16
-      EnableDnsSupport: true
-      EnableDnsHostnames: true
+      CidrBlock: 12.0.0.0/16
       Tags:
         - Key: Name
-          Value: Fullstack-VPC
+          Value: FullstackVPC
 
-  # Internet Gateway
   InternetGateway:
     Type: AWS::EC2::InternetGateway
+
   AttachGateway:
     Type: AWS::EC2::VPCGatewayAttachment
     Properties:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
-  # Public Subnet (Nginx)
+  ElasticIP:
+    Type: AWS::EC2::EIP
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt ElasticIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+
   PublicSubnet:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: 10.0.1.0/24
+      CidrBlock: 12.0.1.0/24
       MapPublicIpOnLaunch: true
-      AvailabilityZone: !Select [0, !GetAZs ""]
 
-  # Private Subnet (Node/React/PostgreSQL)
   PrivateSubnet:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: 10.0.2.0/24
-      MapPublicIpOnLaunch: false
-      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: 12.0.2.0/24
 
-  # Route Table (Public)
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
+
   PublicRoute:
     Type: AWS::EC2::Route
     DependsOn: AttachGateway
@@ -57,132 +62,74 @@ Resources:
       RouteTableId: !Ref PublicRouteTable
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
+
   PublicSubnetRouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PublicSubnet
       RouteTableId: !Ref PublicRouteTable
 
-  # Route Table (Private)
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
   PrivateSubnetRouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PrivateSubnet
       RouteTableId: !Ref PrivateRouteTable
 
-  # Security Group for Public Instance (Nginx)
-  PublicSG:
+  PrivateSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Allow HTTP (80), HTTPS (443)
+      GroupDescription: Private instance access
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
+          FromPort: 22
+          ToPort: 22
           CidrIp: 0.0.0.0/0
-        - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIp: 0.0.0.0/0
-      Tags:
-        - Key: Name
-          Value: PublicSG
-
-  # Security Group for Private Instance (App & DB)
-  PrivateSG:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Allow access from Nginx and internal
-      VpcId: !Ref VPC
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 3000
-          ToPort: 3000
-          SourceSecurityGroupId: !Ref PublicSG
         - IpProtocol: tcp
           FromPort: 5000
           ToPort: 5000
-          SourceSecurityGroupId: !Ref PublicSG
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          CidrIp: 0.0.0.0/0
         - IpProtocol: tcp
           FromPort: 5432
           ToPort: 5432
-          SourceSecurityGroupId: !Ref PublicSG
+          CidrIp: 12.0.2.0/24
+
+  PrivateInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      ImageId: ami-0cd173613e262de82
+      SubnetId: !Ref PrivateSubnet
+      SecurityGroupIds: [!Ref PrivateSecurityGroup]
       Tags:
         - Key: Name
-          Value: PrivateSG
-
-  # EC2 - Public (Nginx)
-  NginxInstance:
-    Type: AWS::EC2::Instance
-    Properties:
-      InstanceType: t2.micro
-      KeyName: !Ref KeyName
-      ImageId: ami-0f918f7e67a3323f0
-      SubnetId: !Ref PublicSubnet
-      SecurityGroupIds:
-        - !Ref PublicSG
+          Value: PrivateInstance
       UserData:
         Fn::Base64: !Sub |
           #!/bin/bash
-          export DEBIAN_FRONTEND=noninteractive
-          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
-          apt update && apt install -y nginx
-          systemctl start nginx
-          systemctl enable nginx
-
-          PRIVATE_IP=$(curl -s http://169.254.169.254/latest/meta-data/local-ipv4 | sed 's/\.[0-9]*$/\.10/')
-          cat >/etc/nginx/sites-available/default <<EOF
-          server {
-              listen 80;
-              server_name _;
-
-              location /api/ {
-                  proxy_pass http://$PRIVATE_IP:5000/;
-                  proxy_http_version 1.1;
-                  proxy_set_header Upgrade \$http_upgrade;
-                  proxy_set_header Connection 'upgrade';
-                  proxy_set_header Host \$host;
-                  proxy_cache_bypass \$http_upgrade;
-              }
-
-              location / {
-                  proxy_pass http://$PRIVATE_IP:3000/;
-                  proxy_http_version 1.1;
-                  proxy_set_header Upgrade \$http_upgrade;
-                  proxy_set_header Connection 'upgrade';
-                  proxy_set_header Host \$host;
-                  proxy_cache_bypass \$http_upgrade;
-              }
-          }
-          EOF
-
-          systemctl restart nginx
-
-  # EC2 - Private (React + Node.js + PostgreSQL)
-  AppInstance:
-    Type: AWS::EC2::Instance
-    Properties:
-      InstanceType: t2.medium
-      KeyName: !Ref KeyName
-      ImageId: ami-0f918f7e67a3323f0
-      SubnetId: !Ref PrivateSubnet
-      SecurityGroupIds:
-        - !Ref PrivateSG
-      UserData:
-        Fn::Base64: !Sub |
-          #!/bin/bash
-          export DEBIAN_FRONTEND=noninteractive
-          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
           set -e
-          REPO_URL="https://github.com/JohnKumarK/fullstack-crud-react-node-postgresql.git"
+
+          REPO_URL="https://github.com/mk48/fullstack-crud-react-node-postgresql.git"
           APP_DIR="/opt/fullstack"
           BACKEND_DIR="$$APP_DIR/server"
-          FRONTEND_DIR="$$APP_DIR/webclient"
+          FRONTEND_DIR="$$APP_DIR/client"
           USER_NAME="ubuntu"
           API_PORT=5000
           UI_PORT=3000
@@ -192,39 +139,36 @@ Resources:
 
           apt update
           apt install -y git nodejs npm postgresql postgresql-client curl build-essential
-
-          rm -rf $$APP_DIR
-          mkdir -p $$APP_DIR
-
-          git clone "$$REPO_URL" $$APP_DIR
-
+          rm -rf "$$APP_DIR"
+          mkdir -p "$$APP_DIR"
+          git clone "$$REPO_URL" "$$APP_DIR"
           npm config set registry https://registry.npmmirror.com
 
-          sudo -u postgres psql <<EOF
-          DO \$\$
+          sudo -u postgres psql <<'EOF1'
+          DO $$
           BEGIN
-            IF NOT EXISTS (SELECT FROM pg_user WHERE usename = '$$DB_USER') THEN
-              CREATE USER $$DB_USER;
+            IF NOT EXISTS (SELECT FROM pg_user WHERE usename = 'postgres') THEN
+              CREATE USER postgres;
             END IF;
           END
-          \$\$;
-          EOF
+          $$;
+          EOF1
 
           sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname = '$$DB_NAME'" | grep -q 1 || \
-            sudo -u postgres psql -c "CREATE DATABASE $$DB_NAME OWNER $$DB_USER;"
+          sudo -u postgres psql -c "CREATE DATABASE $$DB_NAME OWNER $$DB_USER;"
 
-          sudo -u postgres psql -d $$DB_NAME <<EOF
+          sudo -u postgres psql -d "$$DB_NAME" <<'EOF2'
           CREATE TABLE IF NOT EXISTS users (
             id SERIAL PRIMARY KEY,
             name VARCHAR(100),
             email VARCHAR(100)
           );
-          EOF
+          EOF2
 
-          cd $$BACKEND_DIR
+          cd "$$BACKEND_DIR"
           npm install --legacy-peer-deps --no-audit
 
-          cat >/etc/systemd/system/backend.service <<EOF
+          cat >/etc/systemd/system/backend.service <<EOF3
           [Unit]
           Description=Node.js Backend Service
           After=network.target
@@ -238,22 +182,20 @@ Resources:
 
           [Install]
           WantedBy=multi-user.target
-          EOF
+          EOF3
 
-          cd $$FRONTEND_DIR
+          cd "$$FRONTEND_DIR"
           rm -rf node_modules package-lock.json
           npm install --legacy-peer-deps --no-audit
-
           API_JS="$$FRONTEND_DIR/src/Api.js"
           if [ -f "$$API_JS" ]; then
-            sed -i 's|const API_URL = .*|const API_URL = "/api";|' "$$API_JS"
+            sed -i 's|const API_URL = .*|const API_URL = "http://localhost:5000";|' "$$API_JS"
           fi
 
           npm run build
-
           npm install -g serve --no-audit
 
-          cat >/etc/systemd/system/frontend.service <<EOF
+          cat >/etc/systemd/system/frontend.service <<EOF4
           [Unit]
           Description=React Frontend Service
           After=network.target
@@ -266,16 +208,81 @@ Resources:
 
           [Install]
           WantedBy=multi-user.target
-          EOF
+          EOF4
 
           systemctl daemon-reexec
           systemctl daemon-reload
           systemctl enable --now backend.service frontend.service
 
+  PublicSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public instance access (Nginx)
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  PublicInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      KeyName: !Ref KeyName
+      ImageId: ami-0cd173613e262de82
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubnet
+          GroupSet:
+            - !Ref PublicSecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          apt update
+          apt install -y nginx
+          PRIVATE_IP=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=PrivateInstance" --query "Reservations[*].Instances[*].PrivateIpAddress" --output=text)
+          cat >/etc/nginx/sites-available/default <<EOF
+          server {
+              listen 80;
+              server_name _;
+
+              location /api/ {
+                  proxy_pass http://$PRIVATE_IP:5000/;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection 'upgrade';
+                  proxy_set_header Host $host;
+                  proxy_cache_bypass $http_upgrade;
+              }
+
+              location / {
+                  proxy_pass http://$PRIVATE_IP:3000/;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection 'upgrade';
+                  proxy_set_header Host $host;
+                  proxy_cache_bypass $http_upgrade;
+              }
+          }
+          EOF
+          ln -s /etc/nginx/sites-available/default /etc/nginx/sites-enabled/
+          nginx -t && systemctl restart nginx
+
 Outputs:
-  NginxPublicIP:
-    Description: Public IP of Nginx Instance
-    Value: !GetAtt NginxInstance.PublicIp
-  PrivateAppInstance:
-    Description: Private IP of Fullstack App Instance
-    Value: !GetAtt AppInstance.PrivateIp
+  PublicIP:
+    Description: Public IP of the Nginx EC2
+    Value: !GetAtt PublicInstance.PublicIp
+    Export:
+      Name: ReactAppPublicIP
+
+  DBEndpoint:
+    Description: PostgreSQL endpoint (use PrivateInstance private IP)
+    Value: !GetAtt PrivateInstance.PrivateIp
+    Export:
+      Name: ReactAppDBEndpoint
