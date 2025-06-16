@@ -1,0 +1,65 @@
+name: Fullstack App CI/CD
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      PRIVATE_IP: ${{ secrets.PRIVATE_INSTANCE_IP }}
+      BASTION_IP: ${{ secrets.PUBLIC_INSTANCE_IP }}
+      SSH_USER: ubuntu
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+
+    - name: Install and Build Frontend
+      run: |
+        cd client
+        npm install --legacy-peer-deps --no-audit
+        npm run build
+        cd ..
+
+    - name: Compress App Files
+      run: |
+        tar czf fullstack.tar.gz server client
+
+    - name: Prepare SSH Key
+      run: |
+        echo "${{ secrets.SSH_KEY }}" > key.pem
+        chmod 600 key.pem
+
+    - name: Upload Archive to Private EC2 via Bastion
+      run: |
+        scp -o StrictHostKeyChecking=no -i key.pem \
+        -o ProxyCommand="ssh -o StrictHostKeyChecking=no -i key.pem -W %h:%p $SSH_USER@${{ secrets.PUBLIC_INSTANCE_IP }}" \
+        fullstack.tar.gz $SSH_USER@$PRIVATE_IP:/home/$SSH_USER/
+
+    - name: Remote Deploy on Private EC2
+      run: |
+        ssh -o StrictHostKeyChecking=no -i key.pem \
+        -o ProxyCommand="ssh -o StrictHostKeyChecking=no -i key.pem -W %h:%p $SSH_USER@${{ secrets.PUBLIC_INSTANCE_IP }}" \
+        $SSH_USER@$PRIVATE_IP << 'EOF'
+          sudo systemctl stop backend.service frontend.service || true
+          rm -rf /opt/fullstack
+          mkdir -p /opt/fullstack
+          tar xzf fullstack.tar.gz -C /opt/fullstack --strip-components=1
+          cd /opt/fullstack/server
+          npm install --legacy-peer-deps --no-audit
+          cd /opt/fullstack/client
+          npm install --legacy-peer-deps --no-audit
+          npm run build
+          sudo systemctl daemon-reload
+          sudo systemctl restart backend.service frontend.service
+        EOF
+
